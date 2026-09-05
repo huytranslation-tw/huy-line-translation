@@ -142,12 +142,12 @@ def handle_message(event):
     if not original_text:
         return
 
-    source_type = getattr(event.source, "type", "")
     user_id = getattr(event.source, "user_id", "")
     group_id = getattr(event.source, "group_id", None)
+    room_id = getattr(event.source, "room_id", None)
     command = original_text.lower().replace(" ", "")
 
-    if source_type == "group" and group_id:
+    if group_id:
         if command == "/kichhoat":
             if user_id != ADMIN_USER_ID:
                 reply_text(event, "Only the owner can activate this translation bot.")
@@ -183,7 +183,7 @@ def handle_message(event):
         if not is_group_allowed(group_id):
             return
 
-    elif source_type != "user":
+    elif room_id:
         return
 
     try:
