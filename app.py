@@ -10,10 +10,11 @@ from linebot.v3.messaging import (
     ApiClient,
     Configuration,
     MessagingApi,
+    PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.webhooks import JoinEvent, MessageEvent, TextMessageContent
 
 
 app = Flask(__name__)
@@ -26,6 +27,14 @@ handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 # The OpenAI SDK reads OPENAI_API_KEY from Render's environment variables.
 openai_client = OpenAI(timeout=20.0, max_retries=1)
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-terra")
+ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "").strip()
+PERMANENT_GROUPS = {
+    group_id.strip()
+    for group_id in os.environ.get("ALLOWED_GROUP_IDS", "").split(",")
+    if group_id.strip()
+}
+runtime_allowed_groups = set()
+runtime_blocked_groups = set()
 
 
 @app.route("/", methods=["GET"])
@@ -48,6 +57,55 @@ def callback():
 
 def contains_chinese(text):
     return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
+
+
+def reply_text(event, text):
+    with ApiClient(configuration) as api_client:
+        MessagingApi(api_client).reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=text[:4900])],
+            )
+        )
+
+
+def is_group_allowed(group_id):
+    if group_id in runtime_blocked_groups:
+        return False
+    return group_id in PERMANENT_GROUPS or group_id in runtime_allowed_groups
+
+
+@handler.add(JoinEvent)
+def handle_join(event):
+    group_id = getattr(event.source, "group_id", None)
+    if not group_id:
+        return
+
+    reply_text(
+        event,
+        "This group is locked. Only the owner can activate HUY Translation "
+        "by sending /kichhoat in this group.",
+    )
+
+    if ADMIN_USER_ID:
+        try:
+            with ApiClient(configuration) as api_client:
+                MessagingApi(api_client).push_message(
+                    PushMessageRequest(
+                        to=ADMIN_USER_ID,
+                        messages=[
+                            TextMessage(
+                                text=(
+                                    "HUY Translation was added to a new group.\n"
+                                    f"Group ID: {group_id}\n"
+                                    "Send /kichhoat in that group to enable translation."
+                                )
+                            )
+                        ],
+                    )
+                )
+        except Exception:
+            app.logger.exception("Could not notify the owner")
 
 
 def translate_text(text):
@@ -84,6 +142,50 @@ def handle_message(event):
     if not original_text:
         return
 
+    source_type = getattr(event.source, "type", "")
+    user_id = getattr(event.source, "user_id", "")
+    group_id = getattr(event.source, "group_id", None)
+    command = original_text.lower().replace(" ", "")
+
+    if source_type == "group" and group_id:
+        if command == "/kichhoat":
+            if user_id != ADMIN_USER_ID:
+                reply_text(event, "Only the owner can activate this translation bot.")
+                return
+            runtime_allowed_groups.add(group_id)
+            runtime_blocked_groups.discard(group_id)
+            reply_text(
+                event,
+                "Translation enabled for this group.\n"
+                f"Group ID: {group_id}\n"
+                "For permanent access, add this ID to ALLOWED_GROUP_IDS on Render.",
+            )
+            return
+
+        if command == "/khoa":
+            if user_id != ADMIN_USER_ID:
+                reply_text(event, "Only the owner can lock this translation bot.")
+                return
+            runtime_allowed_groups.discard(group_id)
+            runtime_blocked_groups.add(group_id)
+            reply_text(event, "Translation has been locked for this group.")
+            return
+
+        if command == "/roinhom":
+            if user_id != ADMIN_USER_ID:
+                reply_text(event, "Only the owner can remove this translation bot.")
+                return
+            reply_text(event, "HUY Translation is leaving this group.")
+            with ApiClient(configuration) as api_client:
+                MessagingApi(api_client).leave_group(group_id)
+            return
+
+        if not is_group_allowed(group_id):
+            return
+
+    elif source_type != "user":
+        return
+
     try:
         translated_text = translate_text(original_text)
     except Exception:
@@ -91,13 +193,7 @@ def handle_message(event):
         translated_text = "Translation failed. Please try again later."
 
     try:
-        with ApiClient(configuration) as api_client:
-            MessagingApi(api_client).reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=translated_text)],
-                )
-            )
+        reply_text(event, translated_text)
     except Exception:
         app.logger.exception("LINE reply failed")
 
