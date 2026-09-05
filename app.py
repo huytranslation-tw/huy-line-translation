@@ -1,19 +1,19 @@
 import os
 import re
 
-from flask import Flask, request, abort
-from deep_translator import GoogleTranslator
+from flask import Flask, abort, request
+from openai import OpenAI
 
 from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration,
     ApiClient,
+    Configuration,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from linebot.v3.exceptions import InvalidSignatureError
 
 
 app = Flask(__name__)
@@ -21,10 +21,11 @@ app = Flask(__name__)
 configuration = Configuration(
     access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 )
+handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
 
-handler = WebhookHandler(
-    os.environ["LINE_CHANNEL_SECRET"]
-)
+# The OpenAI SDK reads OPENAI_API_KEY from Render's environment variables.
+openai_client = OpenAI(timeout=20.0, max_retries=1)
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-terra")
 
 
 @app.route("/", methods=["GET"])
@@ -49,40 +50,56 @@ def contains_chinese(text):
     return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
 
 
+def translate_text(text):
+    if contains_chinese(text):
+        direction = "Translate the message into natural, clear Vietnamese."
+    else:
+        direction = "Translate the message into natural Traditional Chinese used in Taiwan."
+
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        instructions=(
+            "You are HUY Translation, a professional Chinese-Vietnamese translator "
+            "for Vietnamese workers and employers in Taiwan. "
+            f"{direction} "
+            "Preserve names, numbers, dates, addresses, shift times, company names, "
+            "LINE mentions, and the original level of politeness. "
+            "Return only the translation, with no explanation, labels, or quotation marks."
+        ),
+        input=text,
+        max_output_tokens=1200,
+    )
+
+    translated = response.output_text.strip()
+    if not translated:
+        raise ValueError("OpenAI returned an empty translation")
+
+    # LINE text messages are limited in length. Keep a safe margin.
+    return translated[:4900]
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     original_text = event.message.text.strip()
+    if not original_text:
+        return
 
     try:
-        # Chinese -> Vietnamese
-        if contains_chinese(original_text):
-            translated_text = GoogleTranslator(
-                source="auto",
-                target="vi"
-            ).translate(original_text)
+        translated_text = translate_text(original_text)
+    except Exception:
+        app.logger.exception("Translation failed")
+        translated_text = "Translation failed. Please try again later."
 
-        # Vietnamese/other text -> Traditional Chinese
-        else:
-            translated_text = GoogleTranslator(
-                source="auto",
-                target="zh-TW"
-            ).translate(original_text)
-
-    except Exception as e:
-        app.logger.exception(e)
-        translated_text = "Dịch thất bại. Vui lòng thử lại sau."
-
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[
-                    TextMessage(text=translated_text)
-                ]
+    try:
+        with ApiClient(configuration) as api_client:
+            MessagingApi(api_client).reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=translated_text)],
+                )
             )
-        )
+    except Exception:
+        app.logger.exception("LINE reply failed")
 
 
 if __name__ == "__main__":
