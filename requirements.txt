@@ -1,4 +1,4 @@
-Flask
-line-bot-sdk
-gunicorn
-deep-translator
+Flask>=3.0,<4.0
+gunicorn>=23.0,<24.0
+line-bot-sdk>=3.0,<4.0
+openai>=1.0,<3.0
