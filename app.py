@@ -103,10 +103,16 @@ def owner_is_in_group(group_id):
     return allowed
 
 
-def is_group_allowed(group_id):
+def is_group_allowed(group_id, user_id=""):
     if group_id in runtime_blocked_groups:
         return False
     if group_id in PERMANENT_GROUPS or group_id in runtime_allowed_groups:
+        return True
+    # Safe fallback when LINE cannot return the owner's group profile:
+    # a message sent by the configured owner proves the owner is in this group.
+    if user_id == ADMIN_USER_ID:
+        runtime_allowed_groups.add(group_id)
+        group_access_cache.pop(group_id, None)
         return True
     return owner_is_in_group(group_id)
 
@@ -226,7 +232,7 @@ def handle_message(event):
                 MessagingApi(api_client).leave_group(group_id)
             return
 
-        if not is_group_allowed(group_id):
+        if not is_group_allowed(group_id, user_id):
             return
 
     elif room_id:
