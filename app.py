@@ -1,5 +1,6 @@
 import os
 import re
+import time
 
 from flask import Flask, abort, request
 from openai import OpenAI
@@ -35,6 +36,8 @@ PERMANENT_GROUPS = {
 }
 runtime_allowed_groups = set()
 runtime_blocked_groups = set()
+group_access_cache = {}
+GROUP_ACCESS_CACHE_SECONDS = 300
 
 
 @app.route("/", methods=["GET"])
@@ -69,10 +72,43 @@ def reply_text(event, text):
         )
 
 
+def owner_is_in_group(group_id):
+    """Allow a group automatically when the configured owner is a member."""
+    if not ADMIN_USER_ID:
+        app.logger.error("ADMIN_USER_ID is missing; automatic group access is disabled")
+        return False
+
+    now = time.monotonic()
+    cached = group_access_cache.get(group_id)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    allowed = False
+    try:
+        with ApiClient(configuration) as api_client:
+            MessagingApi(api_client).get_group_member_profile(
+                group_id=group_id,
+                user_id=ADMIN_USER_ID,
+            )
+        allowed = True
+    except Exception:
+        # Fail closed: if LINE cannot confirm the owner is in the group,
+        # do not translate messages for that group.
+        app.logger.info("Owner is not confirmed in group %s", group_id)
+
+    group_access_cache[group_id] = (
+        allowed,
+        now + GROUP_ACCESS_CACHE_SECONDS,
+    )
+    return allowed
+
+
 def is_group_allowed(group_id):
     if group_id in runtime_blocked_groups:
         return False
-    return group_id in PERMANENT_GROUPS or group_id in runtime_allowed_groups
+    if group_id in PERMANENT_GROUPS or group_id in runtime_allowed_groups:
+        return True
+    return owner_is_in_group(group_id)
 
 
 @handler.add(JoinEvent)
@@ -81,11 +117,18 @@ def handle_join(event):
     if not group_id:
         return
 
-    reply_text(
-        event,
-        "This group is locked. Only the owner can activate HUY Translation "
-        "by sending /kichhoat in this group.",
-    )
+    if owner_is_in_group(group_id):
+        reply_text(
+            event,
+            "HUY Translation is enabled automatically because the owner is "
+            "a member of this group.",
+        )
+    else:
+        reply_text(
+            event,
+            "This group is locked. HUY Translation works only in groups "
+            "where the owner is a member.",
+        )
 
     if ADMIN_USER_ID:
         try:
@@ -98,7 +141,8 @@ def handle_join(event):
                                 text=(
                                     "HUY Translation was added to a new group.\n"
                                     f"Group ID: {group_id}\n"
-                                    "Send /kichhoat in that group to enable translation."
+                                    "Translation will start automatically if you are "
+                                    "a member of that group."
                                 )
                             )
                         ],
@@ -154,20 +198,22 @@ def handle_message(event):
                 return
             runtime_allowed_groups.add(group_id)
             runtime_blocked_groups.discard(group_id)
+            group_access_cache.pop(group_id, None)
             reply_text(
                 event,
                 "Translation enabled for this group.\n"
                 f"Group ID: {group_id}\n"
-                "For permanent access, add this ID to ALLOWED_GROUP_IDS on Render.",
+                "No Render update is needed while the owner remains in the group.",
             )
             return
 
-        if command == "/khoa":
+        if command in {"/khoa", "/tatdich"}:
             if user_id != ADMIN_USER_ID:
                 reply_text(event, "Only the owner can lock this translation bot.")
                 return
             runtime_allowed_groups.discard(group_id)
             runtime_blocked_groups.add(group_id)
+            group_access_cache.pop(group_id, None)
             reply_text(event, "Translation has been locked for this group.")
             return
 
