@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import time
@@ -11,11 +12,17 @@ from linebot.v3.messaging import (
     ApiClient,
     Configuration,
     MessagingApi,
+    MessagingApiBlob,
     PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
 )
-from linebot.v3.webhooks import JoinEvent, MessageEvent, TextMessageContent
+from linebot.v3.webhooks import (
+    ImageMessageContent,
+    JoinEvent,
+    MessageEvent,
+    TextMessageContent,
+)
 
 
 app = Flask(__name__)
@@ -186,6 +193,80 @@ def translate_text(text):
     return translated[:4900]
 
 
+def image_mime_type(image_bytes):
+    """Detect common LINE image formats from their file signatures."""
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if image_bytes.startswith((b"II*\x00", b"MM\x00*")):
+        raise ValueError("TIFF images are not supported for translation")
+    if image_bytes.startswith(b"BM"):
+        raise ValueError("BMP images are not supported for translation")
+    # LINE images are commonly JPEG. OpenAI accepts JPEG, PNG, GIF, and WebP.
+    return "image/jpeg"
+
+
+def translate_image(image_bytes):
+    if not image_bytes:
+        raise ValueError("LINE returned an empty image")
+
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    image_url = (
+        f"data:{image_mime_type(image_bytes)};base64,{encoded_image}"
+    )
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        instructions=(
+            "You are HUY Translation, a Chinese-Vietnamese image-text translator "
+            "for Vietnamese workers and employers in Taiwan. Read the visible text "
+            "in the image and translate its meaning. If the text is Chinese, translate "
+            "it into clear, natural Vietnamese. If the text is Vietnamese or another "
+            "non-Chinese language, translate it into natural Traditional Chinese used "
+            "in Taiwan. Preserve names, numbers, dates, addresses, and company names. "
+            "Return exactly one concise line beginning with 'Nội dung: '. Do not "
+            "describe the image, add explanations, or create an image. If no text is "
+            "readable, return exactly 'Nội dung: Không đọc rõ chữ trong ảnh.'"
+        ),
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Read and translate the text in this image.",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": image_url,
+                        "detail": "high",
+                    },
+                ],
+            }
+        ],
+        max_output_tokens=1200,
+    )
+
+    translated = response.output_text.strip()
+    if not translated:
+        raise ValueError("OpenAI returned an empty image translation")
+    return translated[:4900]
+
+
+def event_is_in_allowed_context(event):
+    """Apply the existing group allowlist to image messages as well as text."""
+    user_id = getattr(event.source, "user_id", "")
+    group_id = getattr(event.source, "group_id", None)
+    room_id = getattr(event.source, "room_id", None)
+    if group_id:
+        return is_group_allowed(group_id, user_id)
+    return not room_id
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     original_text = event.message.text.strip()
@@ -214,42 +295,4 @@ def handle_message(event):
             return
 
         if command in {"/khoa", "/tatdich"}:
-            if user_id != ADMIN_USER_ID:
-                reply_text(event, "Only the owner can lock this translation bot.")
-                return
-            runtime_allowed_groups.discard(group_id)
-            runtime_blocked_groups.add(group_id)
-            group_access_cache.pop(group_id, None)
-            reply_text(event, "Translation has been locked for this group.")
-            return
-
-        if command == "/roinhom":
-            if user_id != ADMIN_USER_ID:
-                reply_text(event, "Only the owner can remove this translation bot.")
-                return
-            reply_text(event, "HUY Translation is leaving this group.")
-            with ApiClient(configuration) as api_client:
-                MessagingApi(api_client).leave_group(group_id)
-            return
-
-        if not is_group_allowed(group_id, user_id):
-            return
-
-    elif room_id:
-        return
-
-    try:
-        translated_text = translate_text(original_text)
-    except Exception:
-        app.logger.exception("Translation failed")
-        translated_text = "Translation failed. Please try again later."
-
-    try:
-        reply_text(event, translated_text)
-    except Exception:
-        app.logger.exception("LINE reply failed")
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+            if user_id != ADMIN_
