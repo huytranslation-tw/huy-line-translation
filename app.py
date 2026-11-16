@@ -177,7 +177,7 @@ def translate_text(text):
             "You are HUY Translation, a professional Chinese-Vietnamese translator "
             "for Vietnamese workers and employers in Taiwan. "
             f"{direction} "
-            "Preserve names, numbers, dates, addresses, shift times, company names, "
+    "Preserve names, numbers, dates, addresses, shift times, company names, "
             "LINE mentions, and the original level of politeness. "
             "Return only the translation, with no explanation, labels, or quotation marks."
         ),
@@ -295,4 +295,63 @@ def handle_message(event):
             return
 
         if command in {"/khoa", "/tatdich"}:
-            if user_id != ADMIN_
+            if user_id != ADMIN_USER_ID:
+                reply_text(event, "Only the owner can lock this translation bot.")
+                return
+            runtime_allowed_groups.discard(group_id)
+            runtime_blocked_groups.add(group_id)
+            group_access_cache.pop(group_id, None)
+            reply_text(event, "Translation has been locked for this group.")
+            return
+
+        if command == "/roinhom":
+            if user_id != ADMIN_USER_ID:
+                reply_text(event, "Only the owner can remove this translation bot.")
+                return
+            reply_text(event, "HUY Translation is leaving this group.")
+            with ApiClient(configuration) as api_client:
+                MessagingApi(api_client).leave_group(group_id)
+            return
+
+        if not is_group_allowed(group_id, user_id):
+            return
+
+    elif room_id:
+        return
+
+    try:
+        translated_text = translate_text(original_text)
+    except Exception:
+        app.logger.exception("Translation failed")
+        translated_text = "Translation failed. Please try again later."
+
+    try:
+        reply_text(event, translated_text)
+    except Exception:
+        app.logger.exception("LINE reply failed")
+
+
+@handler.add(MessageEvent, message=ImageMessageContent)
+def handle_image_message(event):
+    if not event_is_in_allowed_context(event):
+        return
+
+    try:
+        with ApiClient(configuration) as api_client:
+            image_bytes = MessagingApiBlob(api_client).get_message_content(
+                event.message.id
+            )
+        translated_text = translate_image(image_bytes)
+    except Exception:
+        app.logger.exception("Image translation failed")
+        translated_text = "Nội dung: Chưa dịch được ảnh này, anh thử gửi lại nhé."
+
+    try:
+        reply_text(event, translated_text)
+    except Exception:
+        app.logger.exception("LINE image-translation reply failed")
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port) 
